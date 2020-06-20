@@ -8,7 +8,7 @@ accession="MN908947.3"
 
 HELP="""
 Flags:
-    -d  :  Directory to configure database within (~50-60GB)
+    -d  :  Directory to configure database within (~10GB)
     -a  :  Accession to use as viral reference (default=MN908947.3)
 """
 
@@ -25,7 +25,7 @@ if [ $database_dir = 0 ] ; then
     exit 1
 fi
 
-echo "Warning: databases require 50-60GB for final databases and can use up to 100GB during building"
+echo -e "Warning: \n - final databases require ~10GB of storage\n - building databases temporarily requires a peak of ~35GB of storage and ~2GB of memory \n - script takes up to ~1.5 hours (system depending)"
 
 # make database dir and get abspath to it
 mkdir -p $database_dir
@@ -34,11 +34,11 @@ database_dir=$(realpath $database_dir)
 # use curl to grab "simple data dependencies"
 curl -s "https://raw.githubusercontent.com/timflutre/trimmomatic/3694641a92d4dd9311267fed85b05c7a11141e7c/adapters/NexteraPE-PE.fa" > $database_dir/NexteraPE-PE.fa
 curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide&id=${accession}&rettype=gb&retmode=txt" > $database_dir/$accession.gbk
-curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide&id=${accession}&rettype=gff&retmode=txt" > $database_dir/$accession.gff3
+curl -s "https://www.ncbi.nlm.nih.gov/sviewer/viewer.cgi?db=nuccore&report=gff3&id=${accession}" > $database_dir/$accession.gff3
 curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide&id=${accession}&rettype=fasta&retmode=txt" > $database_dir/$accession.fasta
 
 # install and activate env for lmat/kraken to build their databases
-conda create -n data_dependencies -c conda-forge -c bioconda -c fmaguire -y lmat=1.2.6 kraken2=2.0.8
+conda create -n data_dependencies -c conda-forge -c bioconda -y kraken2=2.0.8
 CONDA_BASE=$(conda info --base)
 source $CONDA_BASE/etc/profile.d/conda.sh
 conda activate data_dependencies

@@ -1,16 +1,19 @@
 # This file contains a high-level summary of pipeline configuration and inputs.
 # It is ingested by the Snakefile, and also intended to be human-readable.
 
+# Folder to place all results (can be relative or absolute path)
+result_dir: "results_dir"
+
 # Minimum quality threshold, used in 'trim_galore' and 'ivar trim'
 min_qual: 20
 
 # Minimum read length to retain after trimming, used in 'trim_galore' and 'ivar trim'
 min_len: 20
 
-# Path to .bed file defining amplicon primer scheme
-scheme_bed: 'resources/primer_schemes/Wuhan_liverpool_primers_28.01.20.bed'
+# path from snakemake dir to .bed file defining amplicon primer scheme
+scheme_bed: 'resources/primer_schemes/nCoV-2019_v3_fixed.bed'
 
-# Path to bwa indexed human reference genome
+# path from snakemake dir to bwa indexed human reference genome
 human_reference: 'data/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna'
 
 # Used as bwa reference genome when removing host sequences.
@@ -37,3 +40,6 @@ ivar_min_freq_threshold: 0.25
 ivar_min_variant_quality: 20
 
 samples: "sample_table.csv"
+
+# fasta of sequences to include with phylo
+phylo_include_seqs: "data/gisaid_hcov-19_2020_05_25_23.fasta"

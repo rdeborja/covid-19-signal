@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import glob
+import json
 import zipfile
 import contextlib
 import html.parser
@@ -12,7 +13,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-long_git_id = '$Id$'
+long_git_id = '$Id: b158164f87c79271ddc9d1083e64e4be1fc26d8e $'
 
 assert long_git_id.startswith('$Id: ')
 short_git_id = long_git_id[5:12]
@@ -20,6 +21,7 @@ short_git_id = long_git_id[5:12]
 # Suppresses matplotlib warning (https://github.com/jaleezyy/covid-19-signal/issues/59)
 # Creates a small memory leak, but it's nontrivial to fix, and won't be a practical concern!
 plt.rcParams.update({'figure.max_open_warning': 0})
+plt.style.use('seaborn-whitegrid')
 
 
 ########################    Helper functions/classes for text file parsing   #######################
@@ -63,6 +65,48 @@ def read_file(filename, allow_missing=True, zname=None):
                 for line in f:
                     yield line.decode('ascii')
 
+class QUASTParser(html.parser.HTMLParser):
+
+    def __init__(self):
+        html.parser.HTMLParser.__init__(self)
+        self.extracting = False
+        self.quast_data = ""
+
+
+    def handle_starttag(self, tag, attr):
+        if tag == 'div' and attr == [('id', 'total-report-json')]:
+            self.extracting = True
+        else:
+            return
+
+    def handle_data(self, data):
+        if self.extracting == True:
+            self.quast_data += data
+
+    def handle_endtag(self, tag):
+        if tag == 'div' and self.extracting == True:
+            self.extracting = False
+
+    def convert_data_to_json(self):
+        # convert to json and then simplify as each report has only one sample
+        data = json.loads(self.quast_data.strip())
+
+        data = data['report']
+
+        # simplify report by creating metric: metric_value pairs
+        simplified_report = {}
+        for report_group in data:
+            if report_group[1] != []:
+                for metric in report_group[1]:
+                    metric_name = metric['metricName'].strip()
+                    metric_value = metric['values'][0]
+
+                    if metric_name in simplified_report:
+                        print(f"{metric_name} collision in report")
+                    else:
+                        simplified_report[metric_name] = metric_value
+        return simplified_report
+
 
 class TextFileParser:
     """
@@ -96,15 +140,15 @@ class TextFileParser:
 
         if file_is_missing(filename, allow_missing):
             return { name: None for name in self._field_names }
-        
+
         ret = { name: [] for name in self._field_names }
-        
+
         for line in read_file(filename, allow_missing, zname):
             for (name, (regexp_pattern, regexp_group, dtype, _, _)) in zip(self._field_names, self._field_details):
                 m = re.match(regexp_pattern, line)
                 if m is not None:
                     val = dtype(m.group(regexp_group))
-                    ret[name].append(val)                
+                    ret[name].append(val)
 
         for (name, (_,_,_,required,reducer)) in zip(self._field_names, self._field_details):
             if required and len(ret[name]) == 0:
@@ -117,7 +161,7 @@ class TextFileParser:
                 ret[name] = ret[name][0]
             else:
                 ret[name] = None
-            
+
         return ret
 
 
@@ -184,7 +228,6 @@ class SimpleHTMLTableParser(html.parser.HTMLParser):
             sep = ' ' if (len(s) > 0) else ''
             self.tables[-1][-1][-1] = f"{s}{sep}{data}"
 
-
 def parse_html_tables(html_filename):
     """
     Reads all tables from an HTML file and returns a 3-d array
@@ -248,7 +291,7 @@ def parse_trim_galore_log(filename, allow_missing=True):
     t.add_field('base_pairs_written', r'Total written \(filtered\):\s+([0-9,]+)\s+', dtype=comma_separated_int, reducer=sum)
 
     return t.parse_file(filename, allow_missing)
-    
+
 
 def parse_fastqc_output(zip_filename, allow_missing=True):
     """Returns dict (field_name) -> (parsed_value), see code for list of field_names."""
@@ -328,21 +371,30 @@ def parse_hostremove_hisat2_log(log_filename, allow_missing=True):
 def parse_quast_report(report_filename, allow_missing=True):
     """Returns dict (field_name) -> (parsed_value), see code for list of field_names."""
 
-    t = TextFileParser()
+    # unfortunately only the quast report html contains all the fields
+    # need for summaries, fortunately, it is all encoded in easily extractable
+    # json
+    q = QUASTParser()
+    with open(report_filename) as fh:
+        report = fh.read()
+    q.feed(report)
+    quast_report = q.convert_data_to_json()
 
-    # Note that some fields are "required=False" here.
-    # Sometimes, QUAST doesn't write every field, but I didn't investigate why.
-    t.add_field("genome_length", r'Total length \(>= 0 bp\)\s+(\S+)', dtype=int)
-    t.add_field("genome_fraction", r'Genome fraction \(%\)\s+(\S+)', dtype=float, required=False)   # Note: genome "fraction" is really a percentage
-    t.add_field("genomic_features", r'# genomic features\s+(\S+)', required=False)
-    t.add_field("Ns_per_100_kbp", r"# N's per 100 kbp\s+(\S+)", dtype=float)
-    t.add_field("mismatches_per_100_kbp", r"# mismatches per 100 kbp\s+(\S+)", dtype=float, required=False)
-    t.add_field("indels_per_100_kbp", r"# indels per 100 kbp\s+(\S+)", dtype=float, required=False)
-
-    ret = t.parse_file(report_filename, allow_missing=True)
+    ret = {}
+    ret['genome_length'] = float(quast_report['Total length (>= 0 bp)'])
+    ret['genome_fraction'] = float(quast_report['Genome fraction (%)'])
+    ret['genomic_features'] = str(quast_report['# genomic features'])
+    ret['Ns_per_100_kbp'] = float(quast_report["# N's per 100 kbp"])
+    ret['mismatches'] = float(quast_report['# mismatches'])
+    ret['mismatches_per_100_kbp'] = float(quast_report['# mismatches per 100 kbp'])
+    ret['indels'] = float(quast_report['# indels'])
+    ret['indels_per_100_kbp'] = float(quast_report['# indels per 100 kbp'])
 
     gfrac = ret['genome_fraction']
     ret['qc_gfrac'] = "PASS" if ((gfrac is not None) and (gfrac >= 90)) else "FAIL"
+
+    indels = ret['indels']
+    ret['qc_indel'] = "PASS" if indels == 0 else "WARN"
 
     return ret
 
@@ -390,7 +442,8 @@ def parse_coverage(depth_filename, allow_missing=True):
         'mean_coverage': None,
         'qc_meancov': 'FAIL',
         'qc_cov100': 'FAIL',
-        'qc_cov1000': 'FAIL'
+        'qc_cov1000': 'FAIL',
+        'cov100': 0
     }
 
     if file_is_missing(depth_filename, allow_missing):
@@ -407,6 +460,8 @@ def parse_coverage(depth_filename, allow_missing=True):
     bin_fractions = np.bincount(bin_assignments, minlength=nbins) / float(len(coverage))
     assert bin_fractions.shape == (nbins,)
 
+
+    ret['cov100'] = np.mean(coverage >= 100)
     ret['bin_fractions'] = [ xround(f,3) for f in bin_fractions ]
     ret['mean_coverage'] = xround(np.mean(coverage), 1)
     ret['qc_meancov'] = "PASS" if (np.mean(coverage) >= 2000) else "FAIL"
@@ -504,6 +559,7 @@ def parse_breseq_output(html_filename, allow_missing=True):
 
     variants = [ ]
     qc_varfreq = 'PASS'
+    qc_orf_frameshift = 'PASS'
 
     for row in tables[1][2:]:
         assert len(row) == 7
@@ -520,13 +576,51 @@ def parse_breseq_output(html_filename, allow_missing=True):
         gene = gene.replace('\xa0','')       # remove cosmetic html '&nbsp;'
         gene = gene.replace('\u2011', '-')   # replace unicode underscore by vanilla underscore
 
-        variant = f"{evi} {mut} ({freq}%) {gene}"
+        ann = ann .replace('\xa0','')       # remove cosmetic html '&nbsp;'
+        ann = ann.replace('\u2011', '-')   # replace unicode underscore by vanilla underscore
+        ann = ann.replace(' ', '').replace('(', ' (')
+
+        if ann.count('(') > 1:
+            ann = ann.replace(')', ') & ', 1)
+            gene = gene.replace('→', '→ &', 1)
+
+        variant = f"{evi};\t{pos};\t{mut};\t({freq}%);\t'{ann}';\t'{gene}'"
         variants.append(variant)
 
         if float(freq[:-1]) < 90:
             qc_varfreq = 'WARN'
 
-    return { 'variants': variants, 'qc_varfreq': qc_varfreq }
+        # check for deletions i.e. delta and insertions i.e. +TTT in coding regions
+        if "coding" in ann:
+            # +TTTT
+            letter_ins_check = re.search(r"\+([A-Za-z]+)", mut)
+            if letter_ins_check:
+                # check if insertion is %3 in size i.e. not a frameshift and just
+                # a warning
+                if len(letter_ins_check.group(0)) % 3 == 0:
+                    qc_orf_frameshift = 'WARN'
+                else:
+                    qc_orf_frameshift = 'FAIL'
+
+            # +136 bp
+            size_ins_check = re.search(r"\+([0-9]+) bp", mut)
+            if size_ins_check:
+                # check if insertion is %3 in size i.e. whole codon
+                if int(size_ins_check.group(1)) % 3 == 0:
+                    qc_orf_frameshift = 'WARN'
+                else:
+                    qc_orf_frameshift = 'FAIL'
+
+            # Δ22 bp
+            del_check = re.search(r"Δ([0-9]+)", mut)
+            if del_check:
+                if int(del_check.group(1)) % 3 == 0:
+                    qc_orf_frameshift = 'WARN'
+                else:
+                    qc_orf_frameshift = 'FAIL'
+
+    return { 'variants': variants, 'qc_varfreq': qc_varfreq,
+            'qc_orf_frameshift': qc_orf_frameshift}
 
 
 ########  Base classes for writing summary files, see WriterBase docstring for explanation  ########
@@ -540,9 +634,9 @@ class WriterBase:
     following class hierarchy:
 
         WriterBase
-           SampleTextWriter        writes sample.txt (single-sample)
+           SampleTextWriter        writes {sample_name}_sample.txt (single-sample)
            HTMLWriterBase
-              SampleHTMLWriter     writes sample.html (single-sample)
+              SampleHTMLWriter     writes {sample_name}_sample.html (single-sample)
               SummaryHTMLWriter    writes summary.html (multi-sample)
 
     TODO: add single-sample PDF, multi-sample CSV.
@@ -608,7 +702,7 @@ class WriterBase:
         raise RuntimeError('To be overridden by subclass')
 
 
-    def end_sample(self):
+    def end_sample(self, s):
         raise RuntimeError('To be overridden by subclass')
 
 
@@ -620,7 +714,7 @@ class WriterBase:
 
 
     def write_data_volume_summary(self, s):
-        self.start_kv_pairs("Data Volume", link_filenames=['adapter_trimmed/trim_galore.log'])
+        self.start_kv_pairs("Data Volume", link_filenames=[f"adapter_trimmed/{s.name}_trim_galore.log"])
         self.write_kv_pair("Raw\nData\n(read\npairs)", s.trim_galore['read_pairs_processed'], indent=1)
 
         if self.unabridged:
@@ -639,11 +733,17 @@ class WriterBase:
         key = "Genome Fraction greater than 90%" if self.unabridged else "Genome\nfraction\n>90%"
         self.write_kv_pair(key, s.quast['qc_gfrac'], indent=1, qc=True)
 
+        key = "No indels detected (maximum length 85bp)" if self.unabridged else "No\nindels"
+        self.write_kv_pair(key, s.quast['qc_indel'], indent=1, qc=True)
+
         key = "Depth of coverage >= 2000x" if self.unabridged else "Depth\n>2000"
         self.write_kv_pair(key, s.coverage['qc_meancov'], indent=1, qc=True)
 
         key = "All variants with at least 90% frequency among reads" if self.unabridged else "Variants\n>90%"
         self.write_kv_pair(key, s.breseq['qc_varfreq'], indent=1, qc=True)
+
+        key = "Frameshifts in SARS-CoV-2 open reading frames" if self.unabridged else "ORF\nFrameshifts"
+        self.write_kv_pair(key, s.breseq['qc_orf_frameshift'], indent=1, qc=True)
 
         key = "Reads per base sequence quality" if self.unabridged else "Fastqc\nquality"
         val = s.post_trim_qc['summary'].get('Per base sequence quality', 'FAIL')
@@ -666,7 +766,7 @@ class WriterBase:
         if not self.unabridged:
             return
 
-        self.start_kv_pairs("FASTQC Flags", link_filenames=[f'adapter_trimmed/R{r}_val_{r}_fastqc.html' for r in [1,2]])
+        self.start_kv_pairs("FASTQC Flags", link_filenames=[f"adapter_trimmed/{s.name}_R{r}_val_{r}_fastqc.html" for r in [1,2]])
 
         for flavor in [ 'FAIL', 'WARN' ]:
             for (msg,f) in s.post_trim_qc['summary'].items():
@@ -682,20 +782,22 @@ class WriterBase:
 
 
     def write_kraken2(self, s):
-        self.start_kv_pairs("Kraken2", link_filenames=['kraken2/report'])
+        self.start_kv_pairs("Kraken2", link_filenames=[f"kraken2/{s.name}_kraken2.report"])
         self.write_kv_pair("Reads\nSARS-CoV-2\n(%)", s.kraken2['sars_cov2_percentage'], indent=1)
         self.end_kv_pairs()
 
 
     def write_quast(self, s):
-        self.start_kv_pairs("QUAST", link_filenames=['quast/report.html'])
+        self.start_kv_pairs("QUAST", link_filenames=[f"quast/{s.name}_quast_report.html"])
         self.write_kv_pair("Genome\nLength\n(bp)", s.quast['genome_length'], indent=1)
         self.write_kv_pair("Genome\nFraction\n(%)", s.quast['genome_fraction'], indent=1)
         self.write_kv_pair("N's per\n100 kbp", s.quast['Ns_per_100_kbp'], indent=1)
 
         if self.unabridged:
             self.write_kv_pair("Genomic Features", s.quast['genomic_features'], indent=1)
+            self.write_kv_pair("Mismatches", s.quast['mismatches'], indent=1)
             self.write_kv_pair("Mismatches per 100 kbp", s.quast['mismatches_per_100_kbp'], indent=1)
+            self.write_kv_pair("Indels", s.quast['indels'], indent=1)
             self.write_kv_pair("Indels per 100 kbp", s.quast['indels_per_100_kbp'], indent=1)
 
         self.write_kv_pair("Average\nDepth of\nCoverage", s.coverage['mean_coverage'], indent=1)
@@ -727,7 +829,7 @@ class WriterBase:
         self.write_quast(s)
         self.write_ivar(s)
         self.write_breseq(s)
-        self.end_sample()
+        self.end_sample(s)
 
 
     @staticmethod
@@ -803,7 +905,7 @@ class SampleTextWriter(WriterBase):
     def end_kv_pairs(self):
         print(file=self.f)
 
-    def end_sample(self):
+    def end_sample(self, s):
         pass
 
 
@@ -819,7 +921,7 @@ class SampleHTMLWriter(HTMLWriterBase):
 
         # Start outer table for left/right alignment of summary stats, coverage plot
         print('<p><table><tr>', file=self.f)
-        
+
         # Start inner table for summary stats
         print('<td style="vertical-align: top"><table>', file=self.f)
 
@@ -862,18 +964,15 @@ class SampleHTMLWriter(HTMLWriterBase):
         # Override write_breseq(), in favor of including breseq/index.html as an iframe (see below)
         pass
 
-    def end_sample(self):
+    def end_sample(self, s):
         # End inner table for summary stats
         print('</table></td>', file=self.f)
 
         # Coverage plot
-        print('<td style="vertical-align: top"><img src="coverage.png"></td>', file=self.f)
-
-        # End outer table
-        print('</tr></table>', file=self.f)
+        print(f'<td style="vertical-align: top"><img src="coverage/{s.name}_coverage_plot.png"></td>', file=self.f)
 
         # Breseq iframe
-        print('<iframe src="breseq/output/index.html" width="100%" height="800px" style="border: 0px"></iframe>', file=self.f)
+        print(f'<iframe src="breseq/{s.name}_output/index.html" width="100%" height="800px" style="border: 0px"></iframe>', file=self.f)
 
 
 class SummaryHTMLWriter(HTMLWriterBase):
@@ -896,8 +995,10 @@ class SummaryHTMLWriter(HTMLWriterBase):
 
         # Single-row table containing two summary plots
         print('<p><table><tr>', file=self.f)
-        print('<td><img src="summary1.png"></td>', file=self.f)
-        print('<td><img src="summary2.png"></td>', file=self.f)
+        print('<td><img src="summary_ncov2_in_reads_v_genome_fraction.png"></td>', file=self.f)
+        print('<td><img src="summary_average_depth_v_genome_fraction.png"></td>', file=self.f)
+        print('</tr>', file=self.f)
+        print('<td><img src="summary_highly_covered_v_genome_fraction.png"></td>', file=self.f)
         print('</tr></table>', file=self.f)
 
         # Start long table containing statistics
@@ -921,7 +1022,7 @@ class SummaryHTMLWriter(HTMLWriterBase):
         link_text = s.name
 
         if os.path.exists(s.name):
-            url = f"{os.path.basename(s.name)}/sample.html"
+            url = f"{os.path.basename(s.name)}/{os.path.basename(s.name)}_sample.html"
             link_text = f'<a href="{url}">{link_text}</a>'
 
         self.first_row += f'<th>Sample</th>\n'
@@ -956,7 +1057,7 @@ class SummaryHTMLWriter(HTMLWriterBase):
             m = self.maxlines
             last = f'&nbsp;&nbsp;&nbsp; (+ {n-m+1} more)'
             lines = lines[:(m-1)] + [last]
-        
+
         val = '\n<p style="margin-bottom:0px; margin-top:8px">'.join(lines)
         val = f'<p style="margin-bottom:0px; margin-top:0px"> {val}'
 
@@ -975,7 +1076,7 @@ class SummaryHTMLWriter(HTMLWriterBase):
         self.current_group_colspan = 0
 
 
-    def end_sample(self):
+    def end_sample(self, s):
         assert self.current_group_text is None
 
         if self.num_rows_written == 0:
@@ -1056,61 +1157,14 @@ class Sample:
     def __init__(self, name):
         self.name = name
 
-        self.trim_galore = parse_trim_galore_log(f"{name}/adapter_trimmed/trim_galore.log")
-        self.post_trim_qc = parse_fastqc_pair(f"{name}/adapter_trimmed/R1_val_1_fastqc.zip", f"{name}/adapter_trimmed/R2_val_2_fastqc.zip")
-        self.kraken2 = parse_kraken2_report(f"{name}/kraken2/report")
-        self.quast = parse_quast_report(f"{name}/quast/report.txt")
-        self.consensus = parse_consensus_assembly(f"{name}/core/virus.consensus.fa")
-        self.coverage = parse_coverage(f"{name}/coverage/depth.txt")
-        self.ivar = parse_ivar_variants(f"{name}/core/ivar_variants.tsv")
-        self.breseq = parse_breseq_output(f"{name}/breseq/output/index.html")
-
-
-    def write_coverage_plot(self):
-        in_filename = f"{self.name}/coverage/depth.txt"
-        out_filename = f"{self.name}/coverage.png"
-
-        if not os.path.exists(in_filename):
-            return
-
-        coverage = []
-        for line in open(in_filename):
-            t = line.split('\t')
-            assert len(t) == 3
-            coverage.append(int(t[2]))
-
-        coverage = np.array(coverage)
-        assert np.all(coverage >= 0)
-
-        n = len(coverage)
-        assert n >= 1
-
-        chunk_size = 2500
-        nchunks = (n + chunk_size -1) // chunk_size
-
-        kwds = {'wspace':0, 'hspace':0.2, 'bottom':0.02, 'top':0.98 }
-        fig, axarr = plt.subplots(nchunks, 1, sharex=True, gridspec_kw=kwds)
-        
-        fig.set_figwidth(8)
-        fig.set_figheight(0.75 * nchunks)
-        
-        for i, ax in enumerate(axarr):
-            lo = i*chunk_size
-            hi = min(n, (i+1)*chunk_size)
-            label = f'{lo}-{hi}'
-            
-            ax.fill_between(np.arange(hi-lo), coverage[lo:hi] + 0.1, 1)
-            for level in [ 1.0e1, 1.0e2, 1.0e3]:
-                ax.plot([0,hi-lo], [level,level], ls=':', color='black')
-        
-            ax.set_yscale('log')
-            ax.set_ylim(1.0, 3.0e4)
-            ax.text(0.01, 0.95, label, verticalalignment='top', transform=ax.transAxes, color='red')
-
-        print(f"Writing {out_filename}")
-        plt.savefig(out_filename)
-        plt.clf()
-
+        self.trim_galore = parse_trim_galore_log(f"{name}/adapter_trimmed/{name}_trim_galore.log")
+        self.post_trim_qc = parse_fastqc_pair(f"{name}/adapter_trimmed/{name}_R1_val_1_fastqc.zip", f"{name}/adapter_trimmed/{name}_R2_val_2_fastqc.zip")
+        self.kraken2 = parse_kraken2_report(f"{name}/kraken2/{name}_kraken2.report")
+        self.quast = parse_quast_report(f"{name}/quast/{name}_quast_report.html")
+        self.consensus = parse_consensus_assembly(f"{name}/core/{name}.consensus.fa")
+        self.coverage = parse_coverage(f"{name}/coverage/{name}_depth.txt")
+        self.ivar = parse_ivar_variants(f"{name}/core/{name}_ivar_variants.tsv")
+        self.breseq = parse_breseq_output(f"{name}/breseq/{name}_output/index.html")
 
 class Pipeline:
     """Must be constructed from toplevel pipeline directory."""
@@ -1129,7 +1183,7 @@ class Pipeline:
         """Writes toplevel summary plot: %SARS versus completeness."""
 
         plt.figure(figsize=(7.6,5.7))
-        
+
         xvec = [ ]
         yvec = [ ]
 
@@ -1139,7 +1193,7 @@ class Pipeline:
 
             if (x is None) or (y is None):
                 continue
-            
+
             xvec.append(x)
             yvec.append(y)
 
@@ -1156,16 +1210,16 @@ class Pipeline:
         plt.xlim(0, 100)
         plt.ylim(0, 100)
 
-        print('Writing summary1.png')
-        plt.savefig('summary1.png')
+        print('Writing summary_ncov2_in_reads_v_genome_fraction.png')
+        plt.savefig('summary_ncov2_in_reads_v_genome_fraction.png')
         plt.clf()
 
-        
+
     def write_summary_plot2(self):
         """Writes toplevel summary plot: depth versus completeness."""
 
         plt.figure(figsize=(7.6,5.7))
-        
+
         xvec = [ ]
         yvec = [ ]
 
@@ -1175,7 +1229,7 @@ class Pipeline:
 
             if (x is None) or (y is None):
                 continue
-            
+
             xvec.append(x)
             yvec.append(y)
 
@@ -1191,10 +1245,44 @@ class Pipeline:
         plt.ylabel(r'Genome Fraction (%)')
         plt.ylim(0, 100)
 
-        print('Writing summary2.png')
-        plt.savefig('summary2.png')
+        print('Writing summary_average_depth_v_genome_fraction.png')
+        plt.savefig('summary_average_depth_v_genome_fraction.png')
         plt.clf()
 
+    def write_summary_plot3(self):
+        """Writes toplevel summary plot: highly covered % versus completeness."""
+
+        plt.figure(figsize=(7.6,5.7))
+
+        xvec = [ ]
+        yvec = [ ]
+
+        for s in self.samples:
+            x = s.coverage['cov100']
+            y = s.quast['genome_fraction']
+
+            if (x is None) or (y is None):
+                continue
+
+            xvec.append(x)
+            yvec.append(y)
+
+            if True:
+                scov2 = s.kraken2['sars_cov2_percentage']
+                label = f'{s.name}'
+                if scov2 is not None:
+                    label += f', {scov2:.1f}%'
+                plt.annotate(label, (x,y), xytext=(x,y-5))
+
+        plt.scatter(xvec, yvec, marker='o', facecolor='red')
+        plt.xlabel(r'Fraction of Genome with >100x Coverage')
+        plt.ylabel(r'Genome Fraction (%)')
+        plt.xlim(0, 1)
+        plt.ylim(0, 100)
+
+        print('Writing summary_highly_covered_v_genome_fraction.png')
+        plt.savefig('summary_highly_covered_v_genome_fraction.png')
+        plt.clf()
 
     def write_reports(self):
         if len(self.samples) > 1:
@@ -1204,15 +1292,13 @@ class Pipeline:
 
         for s in self.samples:
             if os.path.exists(s.name):
-                w1 = SampleTextWriter(f'{s.name}/sample.txt')
-                w2 = SampleHTMLWriter(f'{s.name}/sample.html')
+                w1 = SampleTextWriter(f'{s.name}/{s.name}_sample.txt')
+                w2 = SampleHTMLWriter(f'{s.name}/{s.name}_sample.html')
                 sample_writers = [ w1, w2 ]
             else:
                 print(f"Warning: sample directory {s.name} does not exist")
                 sample_writers = [ ]
 
-            s.write_coverage_plot()
-            
             for w in [summary_writer] + sample_writers:
                 w.write_sample(s)
 
@@ -1229,22 +1315,24 @@ class Pipeline:
 
         a = Archive('summary.zip', debug)
         a.add_file('summary.html')
-        a.add_file('summary1.png')
-        a.add_file('summary2.png')
+        a.add_file('summary_ncov2_in_reads_v_genome_fraction.png')
+        a.add_file('summary_average_depth_v_genome_fraction.png')
+        a.add_file('summary_highly_covered_v_genome_fraction.png')
+
 
         for sample in self.samples:
             s = sample.name
-            a.add_glob(f'{s}/sample.txt')
-            a.add_glob(f'{s}/sample.html')
-            a.add_glob(f'{s}/coverage.png')
-            a.add_glob(f'{s}/adapter_trimmed/trim_galore.log')
-            a.add_glob(f'{s}/adapter_trimmed/*_fastqc.html')
-            a.add_glob(f'{s}/kraken2/report')
-            a.add_glob(f'{s}/host_removed/hisat2.log')
+            a.add_glob(f'{s}/{s}_sample.txt')
+            a.add_glob(f'{s}/{s}_sample.html')
+            a.add_glob(f'{s}/coverage/{s}_coverage_plot.png')
+            a.add_glob(f'{s}/adapter_trimmed/{s}_trim_galore.log')
+            a.add_glob(f'{s}/adapter_trimmed/{s}_*_fastqc.html')
+            a.add_glob(f'{s}/kraken2/{s}_kraken2.report')
+            a.add_glob(f'{s}/host_removal/{s}_human_read_mapping.log')
             a.add_glob(f'{s}/quast/*.html')
             a.add_dir(f'{s}/quast/icarus_viewers')
-            a.add_glob(f'{s}/breseq/breseq.log')
-            a.add_dir(f'{s}/breseq/output')
+            a.add_glob(f'{s}/breseq/{s}_breseq.log')
+            a.add_dir(f'{s}/breseq/{s}_output')
 
         a.close()
 
@@ -1261,5 +1349,6 @@ if __name__ == '__main__':
     p = Pipeline(sys.argv[1])
     p.write_summary_plot1()
     p.write_summary_plot2()
+    p.write_summary_plot3()
     p.write_reports()
     p.write_archive()
