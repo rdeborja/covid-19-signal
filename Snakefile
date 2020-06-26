@@ -182,54 +182,46 @@ rule run_raw_fastqc:
         """
 
 ########################## Human Host Removal ################################
-rule raw_reads_human_reference_bwa_map:
+rule raw_reads_composite_reference_bwa_map:
     threads: 2
     conda: 
         'conda_envs/snp_mapping.yaml'
     output:
-        '{sn}/host_removal/{sn}_human_mapping_reads.bam'
+        '{sn}/host_removal/{sn}_viral_and_nonmapping_reads.bam',
     input:
         raw_r1 = '{sn}/combined_raw_fastq/{sn}_R1.fastq.gz',
         raw_r2 = '{sn}/combined_raw_fastq/{sn}_R2.fastq.gz'
     benchmark:
-        "{sn}/benchmarks/{sn}_human_reference_bwa_map.benchmark.tsv"
+        "{sn}/benchmarks/{sn}_composite_reference_bwa_map.benchmark.tsv"
     log:
         '{sn}/host_removal/{sn}_human_read_mapping.log'
     params:
-       human_index = os.path.join(exec_dir, config['human_reference'])
+       composite_index = os.path.join(exec_dir, config['composite_reference']),
+       script_path = os.path.join(exec_dir, "scripts", "filter_non_human_reads.py"),
+       viral_contig_name = config['viral_reference_contig_name']
     shell:
-        '(bwa mem -T 30 -t {threads} {params.human_index} '
+        '(bwa mem -t {threads} {params.composite_index} '
         '{input.raw_r1} {input.raw_r2} | '
-        'samtools view -bS | samtools sort -n -@{threads} -o {output}) 2> {log}'
+        '{params.script_path} -c {params.viral_contig_name} > {output}) 2> {log}'
 
 rule get_host_removed_reads:
+    threads: 2
     conda: 'conda_envs/snp_mapping.yaml'
     output:
-        r1 = '{sn}/host_removal/{sn}_R1.fastq',
-        r2 = '{sn}/host_removal/{sn}_R2.fastq',
-        bam = '{sn}/host_removal/{sn}_human_mapping_reads_filtered_sorted.bam'
+        r1 = '{sn}/host_removal/{sn}_R1.fastq.gz',
+        r2 = '{sn}/host_removal/{sn}_R2.fastq.gz',
+        s = '{sn}/host_removal/{sn}_singletons.fastq.gz',
+        bam = '{sn}/host_removal/{sn}_viral_and_nonmapping_reads_filtered_sorted.bam'
     input:
-        '{sn}/host_removal/{sn}_human_mapping_reads.bam'
+        '{sn}/host_removal/{sn}_viral_and_nonmapping_reads.bam',
     benchmark:
         "{sn}/benchmarks/{sn}_get_host_removed_reads.benchmark.tsv"
     log:
-        '{sn}/host_removal/{sn}_bamtofastq.log'
+        '{sn}/host_removal/{sn}_samtools_fastq.log'
     shell:
         """
-        samtools view -b -f4 {input} | samtools sort -n > {output.bam} 2> {log}
-        bedtools bamtofastq -i {output.bam} -fq {output.r1} -fq2 {output.r2} 2>> {log} 
-        """
-
-rule gzip_host_removed_reads:
-    output:
-        '{sn}/host_removal/{sn}_R1.fastq.gz',
-        '{sn}/host_removal/{sn}_R2.fastq.gz',
-    input:
-        '{sn}/host_removal/{sn}_R1.fastq',
-        '{sn}/host_removal/{sn}_R2.fastq',
-    shell:
-        """
-        gzip {input}
+        samtools view -b {input} | samtools sort -n -@{threads} > {output.bam} 2> {log}
+        samtools fastq -1 {output.r1} -2 {output.r2} -s {output.s} {output.bam} 2>> {log} 
         """
 
 ###### Based on github.com/connor-lab/ncov2019-artic-nf/blob/master/modules/illumina.nf#L124 ######
@@ -348,32 +340,21 @@ rule get_mapping_reads:
     priority: 2
     conda: 'conda_envs/snp_mapping.yaml'
     output:
-        r1 = '{sn}/mapped_clean_reads/{sn}_R1.fastq',
-        r2 = '{sn}/mapped_clean_reads/{sn}_R2.fastq',
+        r1 = '{sn}/mapped_clean_reads/{sn}_R1.fastq.gz',
+        r2 = '{sn}/mapped_clean_reads/{sn}_R2.fastq.gz',
+        s = '{sn}/mapped_clean_reads/{sn}_singletons.fastq.gz',
         bam = '{sn}/mapped_clean_reads/{sn}_sorted_clean.bam'
     input:
         "{sn}/core/{sn}_viral_reference.mapping.primertrimmed.bam",
     benchmark:
         "{sn}/benchmarks/{sn}_get_mapping_reads.benchmark.tsv"
     log:
-        '{sn}/mapped_clean_reads/{sn}_bamtofastq.log'
+        '{sn}/mapped_clean_reads/{sn}_samtools_fastq.log'
     shell:
         """
         samtools sort -n {input} -o {output.bam} 2> {log}
-        bedtools bamtofastq -i {output.bam} -fq {output.r1} -fq2 {output.r2} 2>> {log} 
+        samtools fastq -1 {output.r1} -2 {output.r2} -s {output.s} {output.bam} 2>> {log} 
         """
-
-rule clean_reads_gzip:
-    priority: 2
-    output:
-        '{sn}/mapped_clean_reads/{sn}_R{r}.fastq.gz'
-    input:
-        '{sn}/mapped_clean_reads/{sn}_R{r}.fastq'
-    benchmark:
-        "{sn}/benchmarks/{sn}_clean_reads_gzip_{r}.benchmark.tsv"
-    shell:
-        'gzip {input}'
-
 
 rule run_ivar_consensus:
     conda: 
@@ -390,13 +371,28 @@ rule run_ivar_consensus:
         mpileup_depth = config['mpileup_depth'],
         ivar_min_coverage_depth = config['ivar_min_coverage_depth'],
         ivar_freq_threshold = config['ivar_freq_threshold'],
-        output_prefix = '{sn}/core/{sn}.consensus'
+        output_prefix = '{sn}/core/{sn}.consensus',
     shell:
         '(samtools mpileup -aa -A -d {params.mpileup_depth} -Q0 {input} | '
         'ivar consensus -t {params.ivar_freq_threshold} '
         '-m {params.ivar_min_coverage_depth} -n N -p {params.output_prefix}) '
         '2>{log}'
 
+rule index_viral_reference:
+    # from @jts both mpileup and ivar need a reference .fai file and will create 
+    # it when it doesn't exist. 
+    # When they're run in a pipe like mpileup | ivar there's a race condition 
+    # that causes the error
+    conda: 
+        'conda_envs/ivar.yaml'
+    output:
+        os.path.join(exec_dir, config['viral_reference_genome']) + ".fai"
+    input:
+        os.path.join(exec_dir, config['viral_reference_genome']),
+    shell:
+        'samtools faidx {input}'
+
+    
 rule run_ivar_variants:
     conda: 
         'conda_envs/ivar.yaml'
@@ -404,6 +400,7 @@ rule run_ivar_variants:
         '{sn}/core/{sn}_ivar_variants.tsv'
     input:
         reference = os.path.join(exec_dir, config['viral_reference_genome']),
+        indexed_reference = os.path.join(exec_dir, config['viral_reference_genome']) + ".fai",
         read_bam = "{sn}/core/{sn}_viral_reference.mapping.primertrimmed.sorted.bam",
         viral_reference_gff = os.path.join(exec_dir, config['viral_reference_feature_coords'])
     log:
@@ -414,7 +411,7 @@ rule run_ivar_variants:
         output_prefix = '{sn}/core/{sn}_ivar_variants',
         ivar_min_coverage_depth = config['ivar_min_coverage_depth'],
         ivar_min_freq_threshold = config['ivar_min_freq_threshold'],
-        ivar_min_variant_quality = config['ivar_min_variant_quality']
+        ivar_min_variant_quality = config['ivar_min_variant_quality'],
     shell:
         '(samtools mpileup -aa -A -d 0 --reference {input.reference} -B '
             '-Q 0 {input.read_bam} | '
@@ -444,7 +441,7 @@ rule run_breseq:
         labelled_output_dir = '{sn}/breseq/{sn}_output'
     shell:
         """
-        breseq --reference {params.ref} --num-processors {threads} --polymorphism-prediction --brief-html-output --output {params.outdir} {input} >{log} 2>&1
+        breseq --reference {params.ref} --num-processors {threads} --polymorphism-prediction --brief-html-output --output {params.outdir} {input} > {log} 2>&1
         mv -T {params.unlabelled_output_dir} {params.labelled_output_dir}
         """
 
