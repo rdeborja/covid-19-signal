@@ -19,14 +19,26 @@
 
 from snakemake.utils import validate
 import pandas as pd
-import os
+import os, sys
 
 # The config file contains a high-level summary of pipeline configuration and inputs.
 # It is ingested by the Snakefile, and also intended to be human-readable.
 # For an example config file, see pipeline/example_config.yaml in the covid-19-sequencing repo.
 
 # read and validate config.yaml
-configfile: "config.yaml"
+if '--configfile' in sys.argv:
+    config_filename = os.path.abspath(sys.argv[sys.argv.index('--configfile')+1])
+    # arguments don't line up
+    if not os.path.exists(config_filename):
+        print("Invalid filepath for configfile. Looking for default config.yaml")
+        configfile: "config.yaml"
+        config_filename = os.path.join(os.getcwd(), "config.yaml")
+    else:
+        configfile: config_filename
+else:
+    configfile: "config.yaml"
+    config_filename = os.path.join(os.getcwd(), "config.yaml")
+
 validate(config, 'resources/config.schema.yaml')
 
 # read and validate sample table specified in config.schema.yaml
@@ -56,7 +68,8 @@ rule sort:
     input: expand('{sn}/combined_raw_fastq/{sn}_R{r}_fastqc.html', sn=sample_names, r=[1,2])
 
 rule remove_adapters:
-    input: expand('{sn}/adapter_trimmed/{sn}_R{r}_val_{r}.fq.gz', sn=sample_names, r=[1,2])
+    input: expand('{sn}/adapter_trimmed/{sn}_R{r}_val_{r}.fq.gz', sn=sample_names, r=[1,2]),
+           expand('{sn}/adapter_trimmed/{sn}_R{r}_val_{r}_posttrim_filter.fq.gz', sn=sample_names, r=[1,2]),
 
 rule host_removed_raw_reads:
     input: expand('{sn}/host_removal/{sn}_R{r}.fastq.gz', sn=sample_names, r=[1,2]),
@@ -93,7 +106,7 @@ rule quast:
 
 rule config_sample_log:
     input: 
-        "config.yaml", 
+        config_filename,
         config['samples']
 
 
@@ -125,10 +138,15 @@ rule postprocess:
 
 
 rule ncov_tools:
+    # can't use the one in the ncov-tool dir as it has to include snakemake
     conda:
-        'conda_envs/ncov-tools.yaml'
-    #output:
-    #    qc_analysis
+        'ncov-tools/environment.yml'
+    params:
+        exec_dir = exec_dir,
+        result_dir = os.path.basename(config['result_dir']),
+        amplicon_bed = os.path.join(exec_dir, config['amplicon_loc_bed']),
+        viral_reference_genome = os.path.join(exec_dir, config['viral_reference_genome']),
+        phylo_include_seqs = os.path.join(exec_dir, config['phylo_include_seqs'])
     input:
         consensus = expand('{sn}/core/{sn}.consensus.fa', sn=sample_names),
         bams = expand("{sn}/core/{sn}_viral_reference.mapping.primertrimmed.sorted.bam", sn=sample_names)
@@ -138,10 +156,10 @@ rule ncov_tools:
 ################################# Copy config and sample table to output folder ##################
 rule copy_config_sample_log:
     output: 
-        config="config.yaml", 
+        config = os.path.basename(config_filename),
         sample_table=config["samples"]
     input:
-        origin_config = os.path.join(exec_dir, 'config.yaml'),
+        origin_config = os.path.join(exec_dir, os.path.relpath(config_filename, exec_dir)),
         origin_sample_table = os.path.join(exec_dir, config['samples'])
     shell:
         """
@@ -252,6 +270,24 @@ rule run_trimgalore:
         ' -o {params.output_prefix} --cores {threads} --fastqc '
         '--paired {input.raw_r1} {input.raw_r2} 2> {log}'
 
+rule run_filtering_of_residual_adapters:
+    threads: 2
+    priority: 2
+    conda: 
+        'conda_envs/snp_mapping.yaml'
+    input:
+        r1 = '{sn}/adapter_trimmed/{sn}_R1_val_1.fq.gz',
+        r2 = '{sn}/adapter_trimmed/{sn}_R2_val_2.fq.gz'
+    output:
+        '{sn}/adapter_trimmed/{sn}_R1_val_1_posttrim_filter.fq.gz',
+        '{sn}/adapter_trimmed/{sn}_R2_val_2_posttrim_filter.fq.gz'
+    params:
+        script_path = os.path.join(exec_dir, "scripts", "filter_residual_adapters.py")
+    shell:
+        """
+        python {params.script_path} --input_R1 {input.r1} --input_R2 {input.r2}
+        """
+       
 rule viral_reference_bwa_build:
     conda: 
         'conda_envs/snp_mapping.yaml'
@@ -276,8 +312,8 @@ rule viral_reference_bwa_map:
     output:
         '{sn}/core/{sn}_viral_reference.bam'
     input:
-        r1  = '{sn}/adapter_trimmed/{sn}_R1_val_1.fq.gz',
-        r2  = '{sn}/adapter_trimmed/{sn}_R2_val_2.fq.gz',
+        r1 = '{sn}/adapter_trimmed/{sn}_R1_val_1_posttrim_filter.fq.gz',
+        r2 = '{sn}/adapter_trimmed/{sn}_R2_val_2_posttrim_filter.fq.gz',
         ref = '{sn}/core/viral_reference.bwt'
     benchmark:
         "{sn}/benchmarks/{sn}_viral_reference_bwa_map.benchmark.tsv"
@@ -436,7 +472,7 @@ rule run_breseq:
         "{sn}/benchmarks/{sn}_run_breseq.benchmark.tsv"
     params:
         ref = os.path.join(exec_dir, config['breseq_reference']),
-    	outdir = '{sn}/breseq',
+        outdir = '{sn}/breseq',
         unlabelled_output_dir = '{sn}/breseq/output',
         labelled_output_dir = '{sn}/breseq/{sn}_output'
     shell:
@@ -480,29 +516,30 @@ rule run_kraken2:
     output:
         '{sn}/kraken2/{sn}_kraken2.out'
     input:
-        expand('{{sn}}/adapter_trimmed/{{sn}}_R{r}_val_{r}.fq.gz', r=[1,2])
+        r1 = '{sn}/adapter_trimmed/{sn}_R1_val_1_posttrim_filter.fq.gz',
+        r2 = '{sn}/adapter_trimmed/{sn}_R2_val_2_posttrim_filter.fq.gz'
     log:
         '{sn}/kraken2/{sn}_kraken2.log'
     benchmark:
         "{sn}/benchmarks/{sn}_run_kraken2.benchmark.tsv"
     params:
         outdir = '{sn}/kraken2',
-	    db = os.path.join(exec_dir, config['kraken2_db']),
+        db = os.path.join(exec_dir, config['kraken2_db']),
         labelled_output = '{sn}_kraken2.out',
         labelled_report = '{sn}_kraken2.report',
         labelled_unclassified_reads = '{sn}_kraken2_unclassified_reads#',
         labelled_classified_reads = '{sn}_kraken2_classified_reads#'
     shell:
         'cd {params.outdir} '
-	    '&& kraken2'
-	        ' --db {params.db}'
-	        ' --threads {threads}'
-	        ' --quick --unclassified-out {params.labelled_unclassified_reads}'
-            ' --classified-out {params.labelled_classified_reads}'
-	        ' --output {params.labelled_output}'
-	        ' --paired --gzip-compressed'
-	        ' ../../{input[0]} ../../{input[1]}'
-	        ' --report {params.labelled_report}'
+        '&& kraken2'
+            ' --db {params.db}'
+            ' --threads {threads}'
+            ' --quick --unclassified-out "{params.labelled_unclassified_reads}"'
+            ' --classified-out "{params.labelled_classified_reads}"'
+            ' --output {params.labelled_output}'
+            ' --paired --gzip-compressed'
+            ' ../../{input.r1} ../../{input.r2}'
+            ' --report {params.labelled_report}'
             ' 2>../../{log}'
 
 

@@ -375,11 +375,17 @@ def parse_quast_report(report_filename, allow_missing=True):
     # need for summaries, fortunately, it is all encoded in easily extractable
     # json
     q = QUASTParser()
-    with open(report_filename) as fh:
-        report = fh.read()
-    q.feed(report)
-    quast_report = q.convert_data_to_json()
-
+    try:
+        with open(report_filename) as fh:
+            report = fh.read()
+        q.feed(report)
+        quast_report = q.convert_data_to_json()
+    except FileNotFoundError:
+        print("Warning: file %s does not exist" %(report_filename))
+        report = None
+        quast_report ={'Total length (>= 0 bp)': 0, "# N's per 100 kbp": 0}
+        
+    
     ret = {}
     ret['genome_length'] = float(quast_report['Total length (>= 0 bp)'])
     ret['Ns_per_100_kbp'] = float(quast_report["# N's per 100 kbp"])
@@ -471,7 +477,7 @@ def parse_coverage(depth_filename, allow_missing=True):
     for line in open(depth_filename):
         t = line.split('\t')
         assert len(t) == 3
-        coverage.append(int(t[2]))
+        coverage.append(int(float(t[2].strip("\n"))))
 
     coverage = np.array(coverage)
     bin_assignments = np.searchsorted(np.array(delims), coverage, side='left')
@@ -564,7 +570,7 @@ def parse_breseq_output(html_filename, allow_missing=True):
     """Returns dict (field_name) -> (parsed_value), see code for list of field_names."""
 
     if file_is_missing(html_filename, allow_missing):
-        return { 'variants': [], 'qc_varfreq': 'FAIL' }
+        return { 'variants': [], 'qc_varfreq': 'FAIL', 'qc_orf_frameshift': 'FAIL'}
 
     tables = parse_html_tables(html_filename)
 

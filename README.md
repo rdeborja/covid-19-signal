@@ -39,7 +39,7 @@ Additional software dependencies are managed directly by `snakemake` using conda
   - samtools 1.7/1.9 ([docs](http://www.htslib.org/))
   - bedtools 2.26.0 ([docs](https://bedtools.readthedocs.io/en/latest/))
   - breseq 0.35.0 ([docs](https://barricklab.org/twiki/bin/view/Lab/ToolsBacterialGenomeResequencing))
-  - ivar 1.2 ([docs](https://github.com/andersen-lab/ivar))
+  - ivar 1.2.3 ([docs](https://github.com/andersen-lab/ivar))
   - ncov-tools postprocessing scripts require additional dependencies (see [file](conda_envs/ncov-tools.yaml)).
 
 2. Download necessary database files
@@ -139,4 +139,9 @@ For a step-by-step walkthrough of the pipeline, see [pipeline/README.md](PIPELIN
 
 A diagram of the workflow is shown below.
 
-![Workflow Version 7](./resources/Workflow_Version_7.png)
+![Workflow Version 8](./resources/Workflow_Version_8.png)
+
+## Possible Artefacts
+
+- @jts: Host derived poly-A reads that sneak through the composite host removal stage can align to the viral poly-A tail giving it enough coverage to be called in the consensus.  Having this poly-A tail in the consensus can mess up the later analyses that require MSA.  If a sample is causing issues, check for host-derived poly-A reads. 
+

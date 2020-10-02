@@ -4,6 +4,11 @@ set -e # exit if pipeline returns non-zero status
 set -o pipefail # return value of last command to exit with non-zero status
 source ~/.bashrc
 
+if [ -z "$CONDA_EXEC" ] ; then
+  echo "This script requires conda but it looks like you don't have conda activated" >&2
+  exit 1
+fi
+
 database_dir=0
 accession="MN908947.3"
 
@@ -38,10 +43,10 @@ curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide
 curl -s "https://www.ncbi.nlm.nih.gov/sviewer/viewer.cgi?db=nuccore&report=gff3&id=${accession}" > $database_dir/$accession.gff3
 curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nucleotide&id=${accession}&rettype=fasta&retmode=txt" > $database_dir/$accession.fasta
 
-# install and activate env for lmat/kraken to build their databases
-#$CONDA_EXE create -n data_dependencies -c conda-forge -c bioconda -y kraken2=2.0.8 bwa
+# install and activate env for kraken/bwa to build their databases/index
 CONDA_BASE=$($CONDA_EXE info --base)
 source $CONDA_BASE/etc/profile.d/conda.sh
+conda create -n data_dependencies -c conda-forge -c bioconda -y kraken2=2.0.8 bwa
 conda activate data_dependencies
 #
 # get kraken2, and clean db after building
